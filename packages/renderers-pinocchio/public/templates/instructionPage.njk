@@ -6,7 +6,7 @@
 {{ imports }}
 
 /// `{{ instruction.name | snakeCase }}` CPI helper.
-pub struct {{ instruction.name | pascalCase }}{{ '<\'a>' if instruction.accounts.length > 0 }} {
+pub struct {{ instruction.name | pascalCase }}<'a> {
   {# Accounts #}
   {% for account in instruction.accounts %}
     {% if account.docs.length > 0 %}
@@ -25,21 +25,95 @@ pub struct {{ instruction.name | pascalCase }}{{ '<\'a>' if instruction.accounts
       pub {{ account.name | snakeCase }}: {{ type }},
     {% endif %}
   {% endfor %}
+
   {% for arg in instructionArgs %}
     {% if not arg.default %}
       pub {{ arg.name | snakeCase }}: {{ arg.type }},
     {% endif %}
   {% endfor %}
+
+  pub program: &'a pinocchio::account_info::AccountInfo,
 }
 
-impl{{ '<\'a>' if instruction.accounts.length > 0 }} {{ instruction.name | pascalCase }}{{ '<\'a>' if instruction.accounts.length > 0 }} {
+impl<'a> {{ instruction.name | pascalCase }}<'a> {
     #[inline(always)]
     pub fn invoke(&self) -> pinocchio::ProgramResult {
         self.invoke_signed(&[])
     }
 
-    pub fn invoke_signed(&self, _signers: &[pinocchio::instruction::Signer]) -> pinocchio::ProgramResult {
-      Ok(())
+    pub fn invoke_signed(
+        &self,
+        signers: &[pinocchio::instruction::Signer],
+    ) -> pinocchio::ProgramResult {
+        let mut accounts = Vec::with_capacity({{ instruction.accounts.length }});
+
+        {% for account in instruction.accounts %}
+            {% if account.isSigner === 'either' %}
+                {% if account.isOptional %}
+                    if let Some(({{ account.name | snakeCase }}, signer)) = self.{{ account.name | snakeCase }} {
+                        accounts.push(pinocchio::instruction::AccountMeta::new(
+                            {{ account.name | snakeCase }}.key(),
+                            {{ 'true' if account.isWritable else 'false' }},
+                            signer,
+                        ));
+                    }
+                {% else %}
+                    accounts.push(pinocchio::instruction::AccountMeta::new(
+                        self.{{ account.name | snakeCase }}.0.key(),
+                        {{ 'true' if account.isWritable else 'false' }},
+                        self.{{ account.name | snakeCase }}.1,
+                    ));
+                {% endif %}
+            {% else %}
+                {% if account.isOptional %}
+                    if let Some({{ account.name | snakeCase }}) = self.{{ account.name | snakeCase }} {
+                        accounts.push(pinocchio::instruction::AccountMeta::new(
+                            {{ account.name | snakeCase }}.key(),
+                            {{ 'true' if account.isWritable else 'false' }},
+                            {{ 'true' if account.isSigner else 'false' }},
+                        ));
+                    }
+                {% else %}
+                    accounts.push(pinocchio::instruction::AccountMeta::new(
+                        self.{{ account.name | snakeCase }}.key(),
+                        {{ 'true' if account.isWritable else 'false' }},
+                        {{ 'true' if account.isSigner else 'false' }}
+                    ));
+                {% endif %}
+            {% endif %}
+        {% endfor %}
+
+        let mut data = Vec::new();
+        {% for arg in instruction.arguments %}
+            {% if not arg.defaultValue %}
+                data.extend_from_slice(&self.{{ arg.name | snakeCase }}.to_le_bytes());
+            {% endif %}
+        {% endfor %}
+
+        let instruction = pinocchio::instruction::Instruction {
+            program_id: self.program.key(),
+            accounts: &accounts,
+            data: &data,
+        };
+
+        let mut account_infos = Vec::with_capacity({{ instruction.accounts.length + 1 }});
+        account_infos.push(self.program);
+
+        {% for account in instruction.accounts %}
+            {% if account.isOptional %}
+                if let Some({{ account.name | snakeCase }}) = self.{{ account.name | snakeCase }} {
+                    account_infos.push({{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }});
+                }
+            {% else %}
+                account_infos.push(self.{{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }});
+            {% endif %}
+        {% endfor %}
+
+        if signers.is_empty() {
+            pinocchio::program::invoke(&instruction, &account_infos)
+        } else {
+            pinocchio::program::invoke_signed(&instruction, &account_infos, signers)
+        }
     }
 }
 
