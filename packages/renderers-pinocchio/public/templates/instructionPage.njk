@@ -45,74 +45,108 @@ impl<'a> {{ instruction.name | pascalCase }}<'a> {
         &self,
         signers: &[pinocchio::instruction::Signer],
     ) -> pinocchio::ProgramResult {
-        let mut accounts = Vec::with_capacity({{ instruction.accounts.length }});
+        // Use fixed-size array with Solana transaction limit
+        const MAX_ACCOUNTS: usize = 35;
+        let mut accounts = [pinocchio::instruction::AccountMeta::new(
+            self.program.key(),
+            false,
+            false
+        ); MAX_ACCOUNTS];
+        let mut account_count = 0;
 
         {% for account in instruction.accounts %}
             {% if account.isSigner === 'either' %}
                 {% if account.isOptional %}
                     if let Some(({{ account.name | snakeCase }}, signer)) = self.{{ account.name | snakeCase }} {
-                        accounts.push(pinocchio::instruction::AccountMeta::new(
-                            {{ account.name | snakeCase }}.key(),
-                            {{ 'true' if account.isWritable else 'false' }},
-                            signer,
-                        ));
+                        if account_count < MAX_ACCOUNTS {
+                            accounts[account_count] = pinocchio::instruction::AccountMeta::new(
+                                {{ account.name | snakeCase }}.key(),
+                                {{ 'true' if account.isWritable else 'false' }},
+                                signer,
+                            );
+                            account_count += 1;
+                        }
                     }
                 {% else %}
-                    accounts.push(pinocchio::instruction::AccountMeta::new(
-                        self.{{ account.name | snakeCase }}.0.key(),
-                        {{ 'true' if account.isWritable else 'false' }},
-                        self.{{ account.name | snakeCase }}.1,
-                    ));
+                    if account_count < MAX_ACCOUNTS {
+                        accounts[account_count] = pinocchio::instruction::AccountMeta::new(
+                            self.{{ account.name | snakeCase }}.0.key(),
+                            {{ 'true' if account.isWritable else 'false' }},
+                            self.{{ account.name | snakeCase }}.1,
+                        );
+                        account_count += 1;
+                    }
                 {% endif %}
             {% else %}
                 {% if account.isOptional %}
                     if let Some({{ account.name | snakeCase }}) = self.{{ account.name | snakeCase }} {
-                        accounts.push(pinocchio::instruction::AccountMeta::new(
-                            {{ account.name | snakeCase }}.key(),
-                            {{ 'true' if account.isWritable else 'false' }},
-                            {{ 'true' if account.isSigner else 'false' }},
-                        ));
+                        if account_count < MAX_ACCOUNTS {
+                            accounts[account_count] = pinocchio::instruction::AccountMeta::new(
+                                {{ account.name | snakeCase }}.key(),
+                                {{ 'true' if account.isWritable else 'false' }},
+                                {{ 'true' if account.isSigner else 'false' }},
+                            );
+                            account_count += 1;
+                        }
                     }
                 {% else %}
-                    accounts.push(pinocchio::instruction::AccountMeta::new(
-                        self.{{ account.name | snakeCase }}.key(),
-                        {{ 'true' if account.isWritable else 'false' }},
-                        {{ 'true' if account.isSigner else 'false' }}
-                    ));
+                    if account_count < MAX_ACCOUNTS {
+                        accounts[account_count] = pinocchio::instruction::AccountMeta::new(
+                            self.{{ account.name | snakeCase }}.key(),
+                            {{ 'true' if account.isWritable else 'false' }},
+                            {{ 'true' if account.isSigner else 'false' }}
+                        );
+                        account_count += 1;
+                    }
                 {% endif %}
             {% endif %}
         {% endfor %}
 
-        let mut data = Vec::new();
+        // Serialize instruction data to fixed-size array
+        let mut data = [0u8; 128]; // Fixed buffer for instruction data
+        let mut data_len = 0;
+
         {% for arg in instruction.arguments %}
             {% if not arg.defaultValue %}
-                data.extend_from_slice(&self.{{ arg.name | snakeCase }}.to_le_bytes());
+                let arg_bytes = self.{{ arg.name | snakeCase }}.to_le_bytes();
+                if data_len + arg_bytes.len() <= data.len() {
+                    data[data_len..data_len + arg_bytes.len()].copy_from_slice(&arg_bytes);
+                    data_len += arg_bytes.len();
+                }
             {% endif %}
         {% endfor %}
 
         let instruction = pinocchio::instruction::Instruction {
             program_id: self.program.key(),
-            accounts: &accounts,
-            data: &data,
+            accounts: &accounts[..account_count],
+            data: &data[..data_len],
         };
 
-        let mut account_infos = Vec::with_capacity({{ instruction.accounts.length + 1 }});
-        account_infos.push(self.program);
+        // Use fixed-size array for account_infos
+        const MAX_ACCOUNT_INFOS: usize = 36; // 35 + 1 for program
+        let mut account_infos = [self.program; MAX_ACCOUNT_INFOS];
+        let mut info_count = 1; // Start with 1 since program is already there
 
         {% for account in instruction.accounts %}
             {% if account.isOptional %}
                 if let Some({{ account.name | snakeCase }}) = self.{{ account.name | snakeCase }} {
-                    account_infos.push({{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }});
+                    if info_count < MAX_ACCOUNT_INFOS {
+                        account_infos[info_count] = {{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }};
+                        info_count += 1;
+                    }
                 }
             {% else %}
-                account_infos.push(self.{{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }});
+                if info_count < MAX_ACCOUNT_INFOS {
+                    account_infos[info_count] = self.{{ account.name | snakeCase }}{{ '.0' if account.isSigner === 'either' }};
+                    info_count += 1;
+                }
             {% endif %}
         {% endfor %}
 
         if signers.is_empty() {
-            pinocchio::program::invoke(&instruction, &account_infos)
+            pinocchio::program::invoke(&instruction, &account_infos[..info_count])
         } else {
-            pinocchio::program::invoke_signed(&instruction, &account_infos, signers)
+            pinocchio::program::invoke_signed(&instruction, &account_infos[..info_count], signers)
         }
     }
 }
